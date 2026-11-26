@@ -1,0 +1,162 @@
+import serial
+import time 
+from banco import Banco
+import threading
+
+# 1 - configurações inicias
+PORTA = "COM5"
+VELOCIDADE = 9600
+aluno = "Henrique Oliveira"
+# intervalo entre as consultas de MySQL (segundos)
+INTERVALO = 0.5
+# Parar a Thread
+parar = threading.Event()
+aguardando_opcao_7 = False
+bd = Banco()
+
+def enviar_arduino(arduino, comando):
+    #validação
+    if comando not in ("0","1"):
+        raise ValueError("Comando Inválido")
+    arduino.write(comando.encode())
+
+def verificar_banco(arduino):
+    ultimo_estado = None
+    while not parar.is_set():
+        try:
+            estado = bd.listar(aluno,"leds")
+            #verificação de estado valido
+            if estado in ("0","1"):
+                if estado != ultimo_estado:
+                    #envio o comando
+                    enviar_arduino(arduino,estado) 
+                    #Grava o ultimo estado
+                    ultimo_estado =  estado
+        except Exception as erro:
+            print(f"Erro no MySQL => {erro}")
+        parar.wait(INTERVALO)
+
+def ler_serial(arduino):
+    while not parar.is_set():
+        # Só lê em segundo plano se NÃO estiver dentro da opção 7
+        if not aguardando_opcao_7:
+            try:
+                if arduino.in_waiting > 0:
+                    linha = arduino.readline().decode('utf-8', errors='ignore').strip()
+                    if linha.startswith("RFID:"):
+                        uid = linha.split(":")[1]
+                        print(f"\n[ARDUINO] Cartão RFID detectado: {uid}")
+                        bd.inserir_atualizar(aluno, uid, "rfid")
+            except Exception as erro:
+                print(f"Erro na leitura Serial/RFID => {erro}")
+        parar.wait(0.1)
+
+def menu():
+    print("-=-" * 10, "MENU", "-=-" * 10)
+    print("1 - Ligar o meu LED")
+    print("2 - Desligar o meu LED")
+    print("3 - Consultar Estado")
+    print("4 - Acender todos os LEDs ")
+    print("5 - Apagar todos os LEDs ")
+    print("6 - Alterar LED de um aluno específico")
+    print("7 - leitura de cartão rfid")
+    print("8 - Encerrar programa.")
+    return input("Escolha uma opção: ")
+
+def alterar(estado):
+    print(f"estado {estado}")
+    bd.inserir_atualizar(aluno,estado,"leds")
+        
+def principal():
+    global aguardando_opcao_7
+    bd.criar_tabela()
+    # consulta inicial
+    estado_inicial = bd.listar(aluno, "leds")
+    if estado_inicial is None:
+        bd.inserir_atualizar(aluno, "0", "leds")
+    arduino = serial.Serial(PORTA, VELOCIDADE, timeout=1)
+    time.sleep(2)
+    # criar Thread
+    thread_banco = threading.Thread(target=verificar_banco, args=(arduino,)) 
+    # iniciar thread
+    thread_banco.start()
+
+    thread_serial = threading.Thread(target=ler_serial, args=(arduino,))
+    thread_serial.start()
+
+    try:
+        while True:
+            comando = menu()
+            match comando:
+                case "1":
+                    alterar('1')
+                case "2":
+                    alterar('0')
+                case "3":
+                    estado = bd.listar(aluno, "leds")
+                    print(f"Estado atual do LED: {estado}")
+                case "4":
+                    bd.alterar_todos('1', "leds")
+                case "5":
+                    bd.alterar_todos('0', "leds")
+                case "6":
+                    aluno_alvo = input("Digite o nome exato do aluno alvo: ")
+
+                    novo_estado = input("Digite 1 para Ligar ou 0 para Desligar: ")
+                    
+                    if novo_estado in ("0", "1"):
+                        bd.alterar_especifico(aluno_alvo, novo_estado, "leds")
+                    else:
+                        print("Estado inválido! Use apenas 0 ou 1.")
+                case "7":
+                        aguardando_opcao_7 = True
+                        print("\nAproxime o cartão do leitor para alternar o LED")
+
+                        arduino.reset_input_buffer()
+
+                        cartao_lido = False
+
+                        while not cartao_lido:
+                            if arduino.in_waiting > 0:
+                                linha = arduino.readline().decode(
+                                    'utf-8', errors='ignore'
+                                ).strip()
+
+                                if linha.startswith("RFID:"):
+                                    uid = linha.split(":")[1]
+
+                                    print(f"Cartão lido com sucesso! UID: {uid}")
+
+                                    # Registra o UID do cartão
+                                    bd.inserir_atualizar(aluno, uid, "rfid")
+
+                                    # Consulta o estado atual do LED
+                                    estado_atual = bd.listar(aluno, "leds")
+
+                                    # Inverte o estado
+                                    if estado_atual == "1":
+                                        alterar('0')
+                                        print("LED DESLIGADO!")
+
+                                    elif estado_atual == "0":
+                                        alterar('1')
+                                        print("LED LIGADO!")
+
+                                    cartao_lido = True
+
+                            time.sleep(0.1)
+
+                        aguardando_opcao_7 = False
+                case "8":
+                    print("Encerrando o programa")
+                    break
+                case _:
+                    print("Opção inválida!")
+
+    finally:
+        parar.set()
+        arduino.close()
+        print("Encerrando Thread")
+
+if __name__ == "__main__":
+    principal()
